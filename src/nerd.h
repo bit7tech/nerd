@@ -21,10 +21,10 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 
 // The Nerd VM
-typedef struct Nerd* Nerd;
+typedef struct _Nerd* Nerd;
 
 // The memory operation callback.
-typedef void* (*NeMemoryFunc) (void*, i64, i64);
+typedef void* (*NeMemoryFunc) (Nerd, void*, i64, i64);
 
 //----------------------------------------------------------------------------------------------------------------------
 // Data structures
@@ -38,7 +38,7 @@ typedef enum
 }
 AtomType;
 
-typedef char* NeString;
+typedef const char* NeString;
 
 typedef struct _Atom
 {
@@ -72,6 +72,19 @@ Nerd NeOpen(NeConfig* config);
 
 // Destroy a Nerd VM.
 void NeClose(Nerd N);
+
+//----------------------------------------------------------------------------------------------------------------------
+// Memory management via the VM
+//----------------------------------------------------------------------------------------------------------------------
+
+// Allocate memory.
+void* NeAlloc(Nerd N, i64 bytes);
+
+// Reallocate memory.
+void* NeRealloc(Nerd N, void* address, i64 oldBytes, i64 newBytes);
+
+// Free memory.
+void NeFree(Nerd N, void* address, i64 oldBytes);
 
 //----------------------------------------------------------------------------------------------------------------------
 // Execution
