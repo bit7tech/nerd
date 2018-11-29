@@ -37,6 +37,7 @@ typedef enum
 {
     AT_Nil,
     AT_Integer,
+    AT_Boolean,
     AT_String,
 }
 AtomType;
@@ -86,6 +87,12 @@ Atom NeMakeNil();
 
 // Create an integer atom.
 Atom NeMakeInt(i64 i);
+
+// Create a boolean atom.
+Atom NeMakeBool(int b);
+
+// Create an atom that is just a type.
+Atom NeMakeAtom(AtomType at);
 
 //----------------------------------------------------------------------------------------------------------------------
 // Memory management via the VM

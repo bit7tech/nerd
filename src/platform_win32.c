@@ -47,7 +47,12 @@ extern size_t getline(char **lineptr, size_t *n, FILE *stream);
 
 void SigHandler(int sig)
 {
+    _CrtCheckMemory();
+}
 
+void out(Nerd N, const char* msg)
+{
+    OutputDebugStringA(msg);
 }
 
 int _main(int argc, char** argv)
@@ -67,6 +72,7 @@ int _main(int argc, char** argv)
 
         NeConfig config;
         NeDefaultConfig(&config);
+        config.outputFunc = &out;
         Nerd N = NeOpen(&config);
         if (N)
         {

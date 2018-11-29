@@ -27,6 +27,8 @@
 #define NE_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define NE_MAX(a, b) ((a) < (b) ? (b) : (a))
 
+#define NE_DEBUG_SYMBOL_HASHES      0
+
 //----------------------------------------------------------------------------------------------------------------------{DATA}
 //----------------------------------------------------------------------------------------------------------------------
 // D A T A   S T R U C T U R E S
@@ -288,7 +290,6 @@ static char* arenaFormatV(Nerd N, Arena* arena, const char* format, va_list args
     assert(arena);
     assert(format);
 
-    i64 c = arena->cursor;
     i64 maxSize = arenaSpace(arena);
     char* p = 0;
 
@@ -296,7 +297,7 @@ static char* arenaFormatV(Nerd N, Arena* arena, const char* format, va_list args
     if (numChars < maxSize)
     {
         // The string fits in the space left.
-        p = (char *)arenaAlloc(N, arena, numChars + 1);
+        p = (char *)arenaAlloc(N, arena, numChars);
     }
     else
     {
@@ -331,6 +332,24 @@ static char* arenaFormat(Nerd N, Arena* arena, const char* format, ...)
 
 // Helper macro to allocate memory for a particular data type.
 #define ARENA_ALLOC(n, arena, t, count) (t *)arenaAlignedAlloc((n), (arena), (i64)(sizeof(t) * (count)))
+
+//----------------------------------------------------------------------------------------------------------------------{UTILITIES}
+//----------------------------------------------------------------------------------------------------------------------
+// U T I L T I E S
+//----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+static u64 hash(const char* start, const char* end)
+{
+    u64 h = 14695981039346656037;
+    for (const char* s = start; s != end; ++s)
+    {
+        h ^= *s;
+        h *= (u64)1099511628211ull;
+    }
+
+    return h;
+}
 
 //----------------------------------------------------------------------------------------------------------------------{SCRATCH}
 //----------------------------------------------------------------------------------------------------------------------
@@ -367,10 +386,21 @@ static void scratchFormat(Nerd N, const char* format, ...)
 }
 
 //----------------------------------------------------------------------------------------------------------------------
+// Add a buffer to scratch
+
+static void scratchAdd(Nerd N, const char* start, const char* end)
+{
+    char* p = (char *)arenaAlloc(N, &N->scratch, (i64)(end - start));
+    if (p) memcpy(p, start, (size_t)(end - start));
+}
+
+//----------------------------------------------------------------------------------------------------------------------
 // End the scratch session.
 
 static void scratchEnd(Nerd N)
 {
+    char* p = (char *)arenaAlloc(N, &N->scratch, 1);
+    *p = 0;
     arenaPop(N, &N->scratch);
 }
 
@@ -437,6 +467,27 @@ Atom NeMakeInt(i64 i)
     return a;
 }
 
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeBool(int b)
+{
+    Atom a = {
+        .type = AT_Boolean,
+        .i = b ? 1 : 0
+    };
+    return a;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeAtom(AtomType at)
+{
+    Atom a = {
+        .type = at,
+    };
+    return a;
+}
+
 //----------------------------------------------------------------------------------------------------------------------{PRINT}
 //----------------------------------------------------------------------------------------------------------------------
 // P R I N T I N G
@@ -477,6 +528,10 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
             assert(0);
             scratchFormat(N, "<invalid mode>");
         }
+        break;
+
+    case AT_Boolean:
+        scratchFormat(N, "%s", value.i ? "yes" : "no");
         break;
 
     default:
@@ -528,6 +583,15 @@ typedef enum _NeToken
 
     // Literals
     NeToken_Number,         // e.g. 42, -34
+    NeToken_Symbol,         // e.g. foo, bar, hello-world
+
+    // Keywords
+    NeToken_KEYWORDS,
+    NeToken_Nil = NeToken_KEYWORDS,     // e.g. nil
+    NeToken_Yes,                        // e.g. yes
+    NeToken_No,                         // e.g. no
+
+    NeToken_COUNT
 }
 NeToken;
 
@@ -536,6 +600,58 @@ NeToken;
 #define NE_IS_WHITESPACE(c) (' ' == (c) || '\t' == (c) || '\n' == (c))
 #define NE_IS_CLOSE_PAREN(c) (')' == (c) || ']' == (c) || '}' == (c))
 #define NE_IS_TERMCHAR(c) (NE_IS_WHITESPACE(c) || NE_IS_CLOSE_PAREN(c) || ':' == (c) || '\\' == (c) || 0 == (c))
+
+//----------------------------------------------------------------------------------------------------------------------
+// This table represents the validity of a name (symbol or keyword) character.
+//
+//      0 = Cannot be found within a name.
+//      1 = Can be found within a name.
+//      2 = Can be found within a name but not as the initial character.
+//
+static const char gNameChar[128] =
+{
+    //          00  01  02  03  04  05  06  07  08  09  0a  0b  0c  0d  0e  0f  // Characters
+    /* 00 */    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 
+    /* 10 */    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 
+    /* 20 */    0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, //  !"#$%&' ()*+,-./
+    /* 30 */    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 1, 1, 1, 1, // 01234567 89:;<=>?
+    /* 40 */    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // @ABCDEFG HIJKLMNO
+    /* 50 */    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, // PQRSTUVW XYZ[\]^_
+    /* 60 */    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, // `abcdefg hijklmno
+    /* 70 */    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, // pqrstuvw xyz{|}~
+};
+
+//----------------------------------------------------------------------------------------------------------------------
+
+static const unsigned int gKeyWordHashes[] =
+{
+    /* 0 */     NeToken_Yes,
+    /* 1 */     0,
+    /* 2 */     0,
+    /* 3 */     0,
+    /* 4 */     0,
+    /* 5 */     0,
+    /* 6 */     0,
+    /* 7 */     0,
+    /* 8 */     0,
+    /* 9 */     0,
+    /* A */     NeToken_No,
+    /* B */     0,
+    /* C */     NeToken_Nil,
+    /* D */     0,
+    /* E */     0,
+    /* F */     0,
+};
+
+//----------------------------------------------------------------------------------------------------------------------
+// The order of this array MUST match the order of the enums after
+// NeToken_KEYWORDS.
+static const char* gKeywords[NeToken_COUNT - NeToken_KEYWORDS] =
+{
+    "3nil",
+    "3yes",
+    "2no",
+};
 
 //----------------------------------------------------------------------------------------------------------------------
 
@@ -624,12 +740,15 @@ static NeToken lexBuild(Nerd N, Arena* info, const char* start, const char* end,
 
 NeToken lexErrorV(Nerd N, NeLex* L, const char* origin, const char* format, va_list args)
 {
+    NeOut(N, "%s(%d): LEX ERROR: ", origin, L->line);
+
     const char* errorMsg = scratchStart(N);
     scratchFormatV(N, format, args);
-
-    NeOut(N, "%s(%d): LEX ERROR: %s\n", origin, L->line, errorMsg);
-
     scratchEnd(N);
+
+    NeOut(N, errorMsg);
+    NeOut(N, "\n");
+
     return NeToken_Error;
 }
 
@@ -790,6 +909,51 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
     }
 
     //------------------------------------------------------------------------------------------------------------------
+    // Check for keywords and symbols
+    //------------------------------------------------------------------------------------------------------------------
+
+    else if (gNameChar[c] == 1)
+    {
+        while (gNameChar[c]) c = nextChar(L);
+        ungetChar(L);
+
+        i64 sizeToken = L->cursor - s0;
+        u64 h = hash(s0, L->cursor);
+
+#if NE_DEBUG_SYMBOL_HASHES
+        const char* msg = scratchStart(N);
+        scratchFormat(N, "Hash: \"");
+        scratchAdd(N, s0, L->cursor);
+        scratchFormat(N, "\": %x\n", (int)h);
+        scratchEnd(N);
+        NeOut(N, msg);
+#endif
+
+        i64 tokens = gKeyWordHashes[h & 0xf];
+        while (tokens != 0)
+        {
+            i64 index = (tokens & 0xff) - NeToken_KEYWORDS;
+            tokens >>= 8;
+
+            if ((i64)(*gKeywords[index] - '0') == sizeToken)
+            {
+                // The length of the tokens match with the keywords we're currently testing against.
+                if (strncmp(s0, gKeywords[index] + 1, (size_t)sizeToken) == 0)
+                {
+                    // It is a keywords.
+                    NeToken t = NeToken_KEYWORDS + index;
+                    return lexBuild(N, info, s0, L->cursor, L->line, t, NeMakeNil());
+                }
+            }
+        }
+
+        // Must be a symbol!
+        // #todo: symbols
+        return lexError(N, L, origin, "Symbols not implemented yet");
+    }
+
+
+    //------------------------------------------------------------------------------------------------------------------
     // Unknown token
     //------------------------------------------------------------------------------------------------------------------
 
@@ -841,6 +1005,14 @@ static int nextAtom(Nerd N, const NeLexInfo** tokens, const NeLexInfo* end, Atom
         *outAtom = t->atom;
         break;
 
+    case NeToken_Yes:
+        *outAtom = NeMakeBool(1);
+        break;
+
+    case NeToken_No:
+        *outAtom = NeMakeBool(0);
+        break;
+
     default:
         // #todo: add error message.
         result = 0;
@@ -861,6 +1033,7 @@ static int eval(Nerd N, Atom a, Atom* outResult)
     {
     case AT_Nil:
     case AT_Integer:
+    case AT_Boolean:
     case AT_String:
         // These evaluate to themselves.
         *outResult = a;
