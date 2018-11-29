@@ -7,14 +7,16 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 //----------------------------------------------------------------------------------------------------------------------
 // Index of code:
 //
 //      ARENA       Arena management.
-//      CONFIG      Handles default configuration.
+//      CONFIG      Setting up default configuration.
 //      DATA        Data structures and types.
 //      EXEC        Execution of code.
+//      LEX         Lexical analysis.
 //      LIFETIME    Lifetime management routines for the VM.
 //      MEMORY      Basic memory management.
 //      PRINT       Printing and conversions to strings.
@@ -77,6 +79,7 @@ static void* DefaultMemoryFunc(Nerd N, void* address, i64 oldSize, i64 newSize)
 void NeDefaultConfig(NeConfig* config)
 {
     config->memoryFunc = &DefaultMemoryFunc;
+    config->outputFunc = 0;
 }
 
 //----------------------------------------------------------------------------------------------------------------------{MEMORY}
@@ -408,6 +411,31 @@ void NeClose(Nerd N)
     NeFree(N, N, sizeof(struct _Nerd));
 }
 
+//----------------------------------------------------------------------------------------------------------------------{ATOM}
+//----------------------------------------------------------------------------------------------------------------------
+// A T O M   M A N A G M E N T
+//----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeNil()
+{
+    Atom a = {
+        .type = AT_Nil
+    };
+    return a;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeInt(i64 i)
+{
+    Atom a = {
+        .type = AT_Integer,
+        .i = i
+    };
+    return a;
+}
+
 //----------------------------------------------------------------------------------------------------------------------{PRINT}
 //----------------------------------------------------------------------------------------------------------------------
 // P R I N T I N G
@@ -459,6 +487,341 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
     return p;
 }
 
+//----------------------------------------------------------------------------------------------------------------------
+
+static void NeOutV(Nerd N, const char* format, va_list args)
+{
+    if (N->config.outputFunc)
+    {
+        const char* msg = scratchStart(N);
+        scratchFormatV(N, format, args);
+        scratchEnd(N);
+        N->config.outputFunc(N, msg);
+    }
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+void NeOut(Nerd N, const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    NeOutV(N, format, args);
+    va_end(args);
+}
+
+//----------------------------------------------------------------------------------------------------------------------{LEX}
+//----------------------------------------------------------------------------------------------------------------------
+// L E X I C A L   A N A L Y S I S
+//----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+typedef enum _NeToken
+{
+    // Errors
+    NeToken_Unknown = -100,
+    NeToken_Error,
+
+    // End of token stream
+    NeToken_EOF = 0,
+
+    // Literals
+    NeToken_Number,         // e.g. 42, -34
+}
+NeToken;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+#define NE_IS_WHITESPACE(c) (' ' == (c) || '\t' == (c) || '\n' == (c))
+#define NE_IS_CLOSE_PAREN(c) (')' == (c) || ']' == (c) || '}' == (c))
+#define NE_IS_TERMCHAR(c) (NE_IS_WHITESPACE(c) || NE_IS_CLOSE_PAREN(c) || ':' == (c) || '\\' == (c) || 0 == (c))
+
+//----------------------------------------------------------------------------------------------------------------------
+
+typedef struct _NeLexInfo
+{
+    const char*     start;          // Start of text in source code.
+    const char*     end;            // One past the end of text in the source code.
+    i64             line;           // Line number of token.
+    NeToken         token;          // Token type.
+    Atom            atom;           // Atom generated from token.
+}
+NeLexInfo;
+
+//----------------------------------------------------------------------------------------------------------------------
+
+typedef struct _NeLex
+{
+    i64                 line;           // The current line number in the source.
+    i64                 lastLine;       // The previous line number of the last character read.
+    const char*         cursor;         // The current read position in the lexical stream.
+    const char*         lastCursor;     // The last read position of the last character read.
+    const char*         end;
+}
+NeLex;
+
+//----------------------------------------------------------------------------------------------------------------------
+// Fetch the next character in the stream.  This function keeps tracks of the newlines.  All the different newline
+// representations are converted to just '\n'.  If there are no more characters in the stream, a 0 is returned.
+
+static char nextChar(NeLex* L)
+{
+    char c;
+
+    L->lastCursor = L->cursor;
+    L->lastLine = L->line;
+
+    if (L->cursor == L->end) return 0;
+
+    c = *L->cursor++;
+
+    if ('\r' == c || '\n' == c)
+    {
+        // Handle new-lines
+        ++L->line;
+
+        if (c == '\r')
+        {
+            if ((L->cursor < L->end) && (*L->cursor == '\n'))
+            {
+                ++L->cursor;
+            }
+
+            c = '\n';
+        }
+    }
+
+    return c;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+// Return the cursor to the previous character.  You can only call this once after calling nextChar().
+
+static void ungetChar(NeLex* L)
+{
+    L->line = L->lastLine;
+    L->cursor = L->lastCursor;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+// Add an info to the end of the arena.
+
+static NeToken lexBuild(Nerd N, Arena* info, const char* start, const char* end, i64 line, NeToken token, Atom atom)
+{
+    NeLexInfo* li = ARENA_ALLOC(N, info, NeLexInfo, 1);
+    li->start = start;
+    li->end = end;
+    li->line = line;
+    li->token = token;
+    li->atom = atom;
+
+    return token;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+// Return an error
+
+NeToken lexErrorV(Nerd N, NeLex* L, const char* origin, const char* format, va_list args)
+{
+    const char* errorMsg = scratchStart(N);
+    scratchFormatV(N, format, args);
+
+    NeOut(N, "%s(%d): LEX ERROR: %s\n", origin, L->line, errorMsg);
+
+    scratchEnd(N);
+    return NeToken_Error;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+NeToken lexError(Nerd N, NeLex* L, const char* origin, const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    lexErrorV(N, L, origin, format, args);
+    va_end(args);
+    return NeToken_Error;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+// Fetch the next token
+
+static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
+{
+    if (L->cursor == L->end) return NeToken_EOF;
+
+    // Find the next meaningful character, skipping whitespace and comments.  Comments are delimited by ';' or '# ',
+    // or '#!' (notice the space) to the end of the line, and between '#|' and '|#'.  All comments are nestable.
+    char c = nextChar(L);
+
+    for (;;)
+    {
+        if (0 == c)
+        {
+            // End of stream reached.
+            return NeToken_EOF;
+        }
+
+        // Check for whitespace.  If found, ignore, and get the next character in the stream.
+        if (NE_IS_WHITESPACE(c))
+        {
+            c = nextChar(L);
+            continue;
+        }
+
+        // Check for comments.
+        if (';' == c)
+        {
+            while ((c != 0) && (c != '\n')) c = nextChar(L);
+            continue;
+        }
+        else if ('#' == c)
+        {
+            c = nextChar(L);
+
+            if ('|' == c)
+            {
+                // Nestable, multi-line comment.
+                int depth = 1;
+                while (c != 0 && depth)
+                {
+                    c = nextChar(L);
+                    if ('#' == c)
+                    {
+                        // Check for nested #|...|#
+                        c = nextChar(L);
+                        if ('|' == c)
+                        {
+                            ++depth;
+                        }
+                    }
+                    else if ('|' == c)
+                    {
+                        // Check for terminator |#
+                        c = nextChar(L);
+                        if ('#' == c)
+                        {
+                            --depth;
+                        }
+                    }
+                }
+                continue;
+            }
+            else if (NE_IS_WHITESPACE(c))
+            {
+                // Line-base comment.
+                while ((c != 0) && (c != '\n')) c = nextChar(L);
+                continue;
+            }
+            else
+            {
+                // Possible prefix character.
+                continue;
+            }
+        }
+
+        // If we've reached this point, we have a meaningful character.
+        break;
+    }
+
+    const char* s0 = L->cursor - 1;
+
+    //------------------------------------------------------------------------------------------------------------------
+    // Check for numbers
+    //------------------------------------------------------------------------------------------------------------------
+
+    if (
+        // Check for digit
+        (c >= '0' && c <= '9') ||
+        // Check for '-' or '+'
+        ('-' == c || '+' == c))
+    {
+        // We run the characters through the state machine and either reach state 100 (our terminal state) or EOF.
+        int state = 0;
+        i64 sign = 1;
+        i64 intPart = 0;
+        i64 base = 10;
+
+        // Each state (except the start) always fetches the next character for the next state (i.e. consumes the 
+        // current character).
+        for (;;)
+        {
+            switch (state)
+            {
+            case 0:         // START
+                if (c >= '0' || c <= '9')
+                {
+                    state = 2;
+                }
+                else if (c == '-' || c == '+')
+                {
+                    state = 1;
+                }
+                else
+                {
+                    // Cannot possibly reach here since we check for valid starting characters earlier.  If this
+                    // triggers, then the validity check does not match valid state transitions (i.e. if does not
+                    // match the case statements).
+                    assert(0);
+                }
+                break;
+
+            case 1:         // +/-
+                if (c == '-')
+                {
+                    sign = -1;
+                }
+                state = 2;
+                break;
+
+            case 2:         // Integer digits.
+                intPart = intPart * base + (c - '0');
+                c = nextChar(L);
+                if (c < '0' || c > '9') state = 100;
+                break;
+
+            case 100:
+                ungetChar(L);
+                return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Number, NeMakeInt(intPart));
+            }
+        }
+    }
+
+    //------------------------------------------------------------------------------------------------------------------
+    // Unknown token
+    //------------------------------------------------------------------------------------------------------------------
+
+    else
+    {
+        return lexError(N, L, origin, "Unknown token");
+    }
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+// Analyse some source code and obtains it's tokens.  It returns an arena full of NeLexInfo structures.
+
+static Arena lex(Nerd N, const char* origin, const char* start, const char* end)
+{
+    NeLex L;
+    L.line = 1;
+    L.lastLine = 1;
+    L.cursor = start;
+    L.lastCursor = start;
+    L.end = end;
+    
+    Arena info;
+    arenaInit(N, &info, 4096);
+
+    NeToken t = NeToken_Unknown;
+    while (t != NeToken_Error && t != NeToken_EOF)
+    {
+        t = lexNext(N, &info, &L, origin);
+    }
+
+    return info;
+}
+
+
 //----------------------------------------------------------------------------------------------------------------------{EXEC}
 //----------------------------------------------------------------------------------------------------------------------
 // E X E C U T I O N
@@ -467,6 +830,14 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
 
 int NeRun(Nerd N, char* origin, char* source, i64 size, Atom* outResult)
 {
+    if (size == -1)
+    {
+        size = (i64)strlen(source);
+    }
+
+    Arena tokens = lex(N, origin, source, source + size);
+
+    arenaDone(N, &tokens);
     outResult->type = AT_Nil;
     return 0;
 }

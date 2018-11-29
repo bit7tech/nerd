@@ -3,6 +3,8 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+
+#include <crtdbg.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +50,7 @@ void SigHandler(int sig)
 
 }
 
-int main(int argc, char** argv)
+int _main(int argc, char** argv)
 {
     char* exePath = getExePathName();
 
@@ -72,26 +74,26 @@ int main(int argc, char** argv)
             {
                 char* input = 0;
                 size_t size = 0;
-                size_t result = 0;
+                size_t numChars = 0;
 
                 printf("> ");
-                result = getline(&input, &size, stdin);
-                if ((-1 != result) && (*input == ','))
+                numChars = getline(&input, &size, stdin);
+                if ((-1 != numChars) && (*input == ','))
                 {
                     switch (input[1])
                     {
                     case 'q':
-                        result = -1;
+                        numChars = -1;
                         break;
 
                     case 'r':
-                        result = -1;
+                        numChars = -1;
                         cont = 1;
                         break;
                     }
                 }
 
-                if (-1 == result)
+                if (-1 == numChars)
                 {
                     free(input);
                     break;
@@ -100,7 +102,8 @@ int main(int argc, char** argv)
                 if (size)
                 {
                     Atom result = { AT_Nil };
-                    int success = NeRun(N, "<stdin>", input, size, &result);
+                    int success = NeRun(N, "<stdin>", input, numChars, &result);
+                    free(input);
 
                     NeString resultString = NeToString(N, result, success ? NSM_REPL : NSM_Normal);
 
@@ -112,5 +115,14 @@ int main(int argc, char** argv)
     }
 
     free(exePath);
+    return 0;
+}
+
+int main(int argc, char** argv)
+{
+    _CrtSetBreakAlloc(0);
+    int result = _main(argc, argv);
+    _CrtDumpMemoryLeaks();
+    return result;
 }
 
