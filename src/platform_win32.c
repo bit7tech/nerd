@@ -108,6 +108,9 @@ int _main(int argc, char** argv)
                     NeString resultString = NeToString(N, result, success ? NSM_REPL : NSM_Normal);
 
                     printf(success ? "==> %s\n" : "ERROR: %s\n", resultString);
+#ifndef NDEBUG
+                    _CrtCheckMemory();
+#endif
                 }
             }
         }
@@ -120,9 +123,11 @@ int _main(int argc, char** argv)
 
 int main(int argc, char** argv)
 {
+#ifndef NDEBUG
     _CrtSetBreakAlloc(0);
-    int result = _main(argc, argv);
-    _CrtDumpMemoryLeaks();
-    return result;
+    _CrtSetDbgFlag(_CRTDBG_CHECK_ALWAYS_DF | _CRTDBG_LEAK_CHECK_DF);
+#endif
+
+    return _main(argc, argv);
 }
 

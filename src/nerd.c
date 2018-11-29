@@ -20,6 +20,7 @@
 //      LIFETIME    Lifetime management routines for the VM.
 //      MEMORY      Basic memory management.
 //      PRINT       Printing and conversions to strings.
+//      READ        Reading tokens.
 //
 //----------------------------------------------------------------------------------------------------------------------
 
@@ -749,7 +750,7 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
             switch (state)
             {
             case 0:         // START
-                if (c >= '0' || c <= '9')
+                if (c >= '0' && c <= '9')
                 {
                     state = 2;
                 }
@@ -771,6 +772,7 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
                 {
                     sign = -1;
                 }
+                c = nextChar(L);
                 state = 2;
                 break;
 
@@ -782,7 +784,7 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
 
             case 100:
                 ungetChar(L);
-                return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Number, NeMakeInt(intPart));
+                return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Number, NeMakeInt(sign * intPart));
             }
         }
     }
@@ -821,11 +823,58 @@ static Arena lex(Nerd N, const char* origin, const char* start, const char* end)
     return info;
 }
 
+//----------------------------------------------------------------------------------------------------------------------{READ}
+//----------------------------------------------------------------------------------------------------------------------
+// R E A D I N G
+//----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+static int nextAtom(Nerd N, const NeLexInfo** tokens, const NeLexInfo* end, Atom* outAtom)
+{
+    const NeLexInfo* t = (*tokens)++;
+    int result = 1;
+
+    switch (t->token)
+    {
+    case NeToken_Number:
+        // The lexical analyser did the hard work for us!
+        *outAtom = t->atom;
+        break;
+
+    default:
+        // #todo: add error message.
+        result = 0;
+    }
+
+    return result;
+}
 
 //----------------------------------------------------------------------------------------------------------------------{EXEC}
 //----------------------------------------------------------------------------------------------------------------------
 // E X E C U T I O N
 //----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+static int eval(Nerd N, Atom a, Atom* outResult)
+{
+    switch (a.type)
+    {
+    case AT_Nil:
+    case AT_Integer:
+    case AT_String:
+        // These evaluate to themselves.
+        *outResult = a;
+        break;
+
+    default:
+        assert(0);
+        *outResult = NeMakeNil();
+        return 0;
+    }
+
+    return 1;
+}
+
 //----------------------------------------------------------------------------------------------------------------------
 
 int NeRun(Nerd N, char* origin, char* source, i64 size, Atom* outResult)
@@ -835,11 +884,22 @@ int NeRun(Nerd N, char* origin, char* source, i64 size, Atom* outResult)
         size = (i64)strlen(source);
     }
 
-    Arena tokens = lex(N, origin, source, source + size);
+    // Fetch the lexemes.
+    Arena tokenArena = lex(N, origin, source, source + size);
+    const NeLexInfo* tokens = (NeLexInfo *)tokenArena.start;
+    const NeLexInfo* endToken = tokens + (tokenArena.cursor / sizeof(NeLexInfo));
 
-    arenaDone(N, &tokens);
-    outResult->type = AT_Nil;
-    return 0;
+    int result = 1;
+
+    *outResult = NeMakeNil();
+    while (tokens != endToken)
+    {
+        if (!nextAtom(N, &tokens, endToken, outResult)) return 0;
+        if (!eval(N, *outResult, outResult)) return 0;
+    }
+
+    arenaDone(N, &tokenArena);
+    return 1;
 }
 
 
