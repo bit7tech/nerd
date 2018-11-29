@@ -488,10 +488,41 @@ Atom NeMakeAtom(AtomType at)
     return a;
 }
 
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeChar(char c)
+{
+    Atom a = {
+        .type = AT_Character,
+        .c = c
+    };
+    return a;
+}
+
 //----------------------------------------------------------------------------------------------------------------------{PRINT}
 //----------------------------------------------------------------------------------------------------------------------
 // P R I N T I N G
 //----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+#define NE_IS_WHITESPACE(c) (' ' == (c) || '\t' == (c) || '\n' == (c))
+#define NE_IS_CLOSE_PAREN(c) (')' == (c) || ']' == (c) || '}' == (c))
+#define NE_IS_TERMCHAR(c) (NE_IS_WHITESPACE(c) || NE_IS_CLOSE_PAREN(c) || ':' == (c) || '\\' == (c) || 0 == (c))
+
+//----------------------------------------------------------------------------------------------------------------------
+// This table defines the character tokens that are understood
+static struct { const char* name; char ch; } gCharMap[] =
+{
+    { "5\\space", ' ' },
+    { "9\\backspace", '\b' },
+    { "3\\tab", '\t' },
+    { "7\\newline", '\n' },
+    { "6\\return", '\r' },
+    { "4\\bell", '\a' },
+    { "3\\esc", '\033' },
+    { 0, 0 }
+};
+
 //----------------------------------------------------------------------------------------------------------------------
 
 NeString NeToString(Nerd N, Atom value, NeStringMode mode)
@@ -532,6 +563,53 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
 
     case AT_Boolean:
         scratchFormat(N, "%s", value.i ? "yes" : "no");
+        break;
+
+    case AT_Character:
+        {
+            int done = 0;
+            char c = value.c;
+
+            if (NSM_Normal != mode)
+            {
+                scratchFormat(N, "\\");
+
+                // Check for long name version.
+                if (c <= ' ' || c > 126)
+                {
+                    int i = 0;
+                    for (; gCharMap[i].name; ++i)
+                    {
+                        if (c == gCharMap[i].ch)
+                        {
+                            scratchFormat(N, "%s", gCharMap[i].name + 2);
+                            done = 1;
+                            break;
+                        }
+                    }
+                    if (!done && !gCharMap[i].name)
+                    {
+                        // Unknown characters, so show hex version.
+                        scratchFormat(N, "#x%02x", (int)c);
+                        done = 1;
+                    }
+                }
+
+            }
+
+            if (!done)
+            {
+                if (NE_IS_WHITESPACE(c) || '\r' == c || '\b' == c || '\033' == c ||
+                    (c > ' ' && c < 127))
+                {
+                    scratchAdd(N, &c, &c + 1);
+                }
+                else
+                {
+                    scratchFormat(N, "?");
+                }
+            }
+        }
         break;
 
     default:
@@ -584,6 +662,7 @@ typedef enum _NeToken
     // Literals
     NeToken_Number,         // e.g. 42, -34
     NeToken_Symbol,         // e.g. foo, bar, hello-world
+    NeToken_Character,      // e.g. \c \space 
 
     // Keywords
     NeToken_KEYWORDS,
@@ -594,12 +673,6 @@ typedef enum _NeToken
     NeToken_COUNT
 }
 NeToken;
-
-//----------------------------------------------------------------------------------------------------------------------
-
-#define NE_IS_WHITESPACE(c) (' ' == (c) || '\t' == (c) || '\n' == (c))
-#define NE_IS_CLOSE_PAREN(c) (')' == (c) || ']' == (c) || '}' == (c))
-#define NE_IS_TERMCHAR(c) (NE_IS_WHITESPACE(c) || NE_IS_CLOSE_PAREN(c) || ':' == (c) || '\\' == (c) || 0 == (c))
 
 //----------------------------------------------------------------------------------------------------------------------
 // This table represents the validity of a name (symbol or keyword) character.
@@ -949,9 +1022,105 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
 
         // Must be a symbol!
         // #todo: symbols
-        return lexError(N, L, origin, "Symbols not implemented yet");
+        return lexError(N, L, origin, "Symbols not implemented yet!");
     }
 
+    //------------------------------------------------------------------------------------------------------------------
+    // Check for characters
+    //------------------------------------------------------------------------------------------------------------------
+
+    else if ('\\' == c)
+    {
+        // Fetch next character.
+        c = nextChar(L);
+
+        if (0 == c || NE_IS_WHITESPACE(c))
+        {
+            return lexError(N, L, origin, "Invalid character token.");
+        }
+
+        char ch = c;
+
+        // Check for named characters or hashed characters (\#32 or \#x20
+        if ('#' == c)
+        {
+            c = nextChar(L);
+            if (NE_IS_TERMCHAR(c) || '#' == c)
+            {
+                ungetChar(L);
+                return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Character, NeMakeChar('#'));
+            }
+            else if ('x' == c)
+            {
+                // Possible hex character
+                char ch = 0;
+                int maxNumChars = sizeof(ch) * 2;
+                while (((c = nextChar(L)) > '0' && c <= '9') ||
+                    (c >= 'a' && c <= 'f') ||
+                    (c >= 'A' && c <= 'F'))
+                {
+                    ch <<= 4;
+                    if (c >= '0' && c <= '9') ch += c - '0';
+                    else if (c >= 'a' && c <= 'f') ch += c - 'a' + 10;
+                    else if (c >= 'A' && c <= 'F') ch += c - 'A' + 10;
+                    if (--maxNumChars < 0)
+                    {
+                        // Too many hex digits to hold a character.
+                        return lexError(N, L, origin, "Unknown character token.");
+                    }
+                }
+                if (!NE_IS_TERMCHAR(c)) return lexError(N, L, origin, "Unknown character token.");
+                ungetChar(L);
+
+                return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Character, NeMakeChar(ch));
+            }
+            else if (c >= '0' && c <= '9')
+            {
+                char ch = c - '0';
+                while ((c = nextChar(L)) >= '0' && c <= '9')
+                {
+                    ch *= 10;
+                    ch += c - '0';
+                }
+                if (!NE_IS_TERMCHAR(c)) return lexError(N, L, origin, "Unknown character token.");
+                ungetChar(L);
+                return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Character, NeMakeChar(ch));
+            }
+        }
+
+        c = nextChar(L);
+        if (NE_IS_TERMCHAR(c))
+        {
+            ungetChar(L);
+            return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Character, NeMakeChar(ch));
+        }
+
+        while (!NE_IS_TERMCHAR(c))
+        {
+            if (c < 'a' || c > 'z')
+            {
+                // This cannot be a long character description, so return error
+                if (!NE_IS_TERMCHAR(c)) return lexError(N, L, origin, "Unknown character token.");
+            }
+            c = nextChar(L);
+        }
+        ungetChar(L);
+
+        int tokenLen = (int)(L->cursor - s0);
+        for (int i = 0; gCharMap[i].name; ++i)
+        {
+            int lenToken = (int)gCharMap[i].name[0] - '0' + 1;
+            if (lenToken != tokenLen) continue;
+
+            if (strncmp(gCharMap[i].name + 1, s0, (size_t)tokenLen) == 0)
+            {
+                // Found a match
+                return lexBuild(N, info, s0, L->cursor, L->line, NeToken_Character, NeMakeChar(gCharMap[i].ch));
+            }
+        }
+
+        return lexError(N, L, origin, "Unknown character token.");
+    }
 
     //------------------------------------------------------------------------------------------------------------------
     // Unknown token
@@ -1001,6 +1170,7 @@ static int nextAtom(Nerd N, const NeLexInfo** tokens, const NeLexInfo* end, Atom
     switch (t->token)
     {
     case NeToken_Number:
+    case NeToken_Character:
         // The lexical analyser did the hard work for us!
         *outAtom = t->atom;
         break;
@@ -1034,6 +1204,7 @@ static int eval(Nerd N, Atom a, Atom* outResult)
     case AT_Nil:
     case AT_Integer:
     case AT_Boolean:
+    case AT_Character:
     case AT_String:
         // These evaluate to themselves.
         *outResult = a;

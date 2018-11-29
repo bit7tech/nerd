@@ -38,6 +38,7 @@ typedef enum
     AT_Nil,
     AT_Integer,
     AT_Boolean,
+    AT_Character,
     AT_String,
 }
 AtomType;
@@ -50,6 +51,7 @@ typedef struct _Atom
     union {
         i64 i;
         NeString str;
+        char c;
     };
 }
 Atom;
@@ -90,6 +92,9 @@ Atom NeMakeInt(i64 i);
 
 // Create a boolean atom.
 Atom NeMakeBool(int b);
+
+// Create a character atom.
+Atom NeMakeChar(char c);
 
 // Create an atom that is just a type.
 Atom NeMakeAtom(AtomType at);

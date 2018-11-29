@@ -134,6 +134,8 @@ int main(int argc, char** argv)
     _CrtSetDbgFlag(_CRTDBG_CHECK_ALWAYS_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
-    return _main(argc, argv);
+    int result = _main(argc, argv);
+    _CrtCheckMemory();
+    return result;
 }
 
