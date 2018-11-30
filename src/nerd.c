@@ -557,6 +557,9 @@ static int stringCreate(Nerd N, void* obj, const void* data)
                     switch (range->start[i])
                     {
                     case 'n': str->str[j++] = '\n'; break;
+                    case 'r': str->str[j++] = '\r'; break;
+                    case 't': str->str[j++] = '\t'; break;
+                    case 'b': str->str[j++] = '\b'; break;
                     default:  str->str[j++] = range->start[i]; break;
                     }
                 }
@@ -585,13 +588,27 @@ static void stringDelete(Nerd N, void* obj)
 static void stringToString(Nerd N, void* obj, NeStringMode mode)
 {
     StringObject* str = (StringObject *)obj;
-    if (mode != NSM_Normal)
+
+    if (mode == NSM_Normal)
+    {
+        NeScratchAdd(N, str->str, str->str + str->size);
+    }
+    else
     {
         NeScratchFormat(N, "\"");
-    }
-    NeScratchFormat(N, str->str);
-    if (mode != NSM_Normal)
-    {
+        for (int i = 0; i < str->size; ++i)
+        {
+            switch (str->str[i])
+            {
+            case '\n': NeScratchFormat(N, "\\n"); break;
+            case '\r': NeScratchFormat(N, "\\r"); break;
+            case '\t': NeScratchFormat(N, "\\t"); break;
+            case '\b': NeScratchFormat(N, "\\b"); break;
+
+            default:
+                NeScratchAddChar(N, str->str[i]);
+            }
+        }
         NeScratchFormat(N, "\"");
     }
 }
