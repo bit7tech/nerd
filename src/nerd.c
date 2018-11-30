@@ -38,12 +38,6 @@
 //----------------------------------------------------------------------------------------------------------------------
 
 //----------------------------------------------------------------------------------------------------------------------
-// Object callbacks
-
-//----------------------------------------------------------------------------------------------------------------------
-// Garbage collected header
-
-//----------------------------------------------------------------------------------------------------------------------
 // Memory arena structure
 
 typedef struct
@@ -532,11 +526,47 @@ static int stringCreate(Nerd N, void* obj, const void* data)
 {
     StringObject* str = (StringObject *)obj;
     Range* range = (Range *)data;
-    str->size = (i64)(range->end - range->start);
+
+    // Check the final length of string
+    int strLen = (int)(range->end - range->start);
+    int len = 0;
+    for (int i = 0; i < strLen; ++i)
+    {
+        if (range->start[i] == '\\')
+        {
+            if ((i < (strLen - 1)) && (range->start[i + 1] == '\\')) ++len;
+        }
+        else
+        {
+            ++len;
+        }
+    }
+
+    str->size = len;
     str->str = (char *)NeAlloc(N, str->size + 1);
     if (str->str)
     {
-        memcpy(str->str, range->start, str->size);
+        int j = 0;
+        for (int i = 0; i < strLen; ++i)
+        {
+            if (range->start[i] == '\\')
+            {
+                ++i;
+                if (i < strLen)
+                {
+                    switch (range->start[i])
+                    {
+                    case 'n': str->str[j++] = '\n'; break;
+                    default:  str->str[j++] = range->start[i]; break;
+                    }
+                }
+            }
+            else
+            {
+                str->str[j++] = range->start[i];
+            }
+        }
+        assert(j == len);
         str->str[str->size] = 0;
         return 1;
     }
