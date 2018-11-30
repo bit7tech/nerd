@@ -19,7 +19,9 @@
 //      LEX         Lexical analysis.
 //      LIFETIME    Lifetime management routines for the VM.
 //      MEMORY      Basic memory management.
+//      OBJECTS     Object management.
 //      PRINT       Printing and conversions to strings.
+//      STRINGS     String management
 //      READ        Reading tokens.
 //
 //----------------------------------------------------------------------------------------------------------------------
@@ -34,6 +36,12 @@
 // D A T A   S T R U C T U R E S
 //----------------------------------------------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------------------------------------------
+
+//----------------------------------------------------------------------------------------------------------------------
+// Object callbacks
+
+//----------------------------------------------------------------------------------------------------------------------
+// Garbage collected header
 
 //----------------------------------------------------------------------------------------------------------------------
 // Memory arena structure
@@ -54,6 +62,13 @@ struct _Nerd
 {
     NeConfig        config;         // Copy of the configuration.
     Arena           scratch;        // A place to construct data and strings.
+    Arena           objectInfo;     // All object types.
+
+    // Built-in object types.
+    int             stringType;
+
+    // Garbage collection
+    GcObj*          gcObjs;
 };
 
 //----------------------------------------------------------------------------------------------------------------------{CONFIG}
@@ -286,6 +301,7 @@ static i64 arenaSpace(Arena* arena)
 
 static char* arenaFormatV(Nerd N, Arena* arena, const char* format, va_list args)
 {
+    // #todo: Check usage of null-terminators.
     assert(N);
     assert(arena);
     assert(format);
@@ -369,7 +385,7 @@ static const char* scratchStart(Nerd N)
 //----------------------------------------------------------------------------------------------------------------------
 // Add a printf-style formatted string with a va_list.
 
-static void scratchFormatV(Nerd N, const char* format, va_list args)
+void NeScratchFormatV(Nerd N, const char* format, va_list args)
 {
     arenaFormatV(N, &N->scratch, format, args);
 }
@@ -377,21 +393,30 @@ static void scratchFormatV(Nerd N, const char* format, va_list args)
 //----------------------------------------------------------------------------------------------------------------------
 // Add a printf-style formatted string with variable arguments.
 
-static void scratchFormat(Nerd N, const char* format, ...)
+void NeScratchFormat(Nerd N, const char* format, ...)
 {
     va_list args;
     va_start(args, format);
-    scratchFormatV(N, format, args);
+    NeScratchFormatV(N, format, args);
     va_end(args);
 }
 
 //----------------------------------------------------------------------------------------------------------------------
 // Add a buffer to scratch
 
-static void scratchAdd(Nerd N, const char* start, const char* end)
+void NeScratchAdd(Nerd N, const char* start, const char* end)
 {
     char* p = (char *)arenaAlloc(N, &N->scratch, (i64)(end - start));
     if (p) memcpy(p, start, (size_t)(end - start));
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+// Add a single character to scratch.
+
+void NeScratchAddChar(Nerd N, char c)
+{
+    char* p = (char *)arenaAlloc(N, &N->scratch, 1);
+    *p = c;
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -402,6 +427,156 @@ static void scratchEnd(Nerd N)
     char* p = (char *)arenaAlloc(N, &N->scratch, 1);
     *p = 0;
     arenaPop(N, &N->scratch);
+}
+
+//----------------------------------------------------------------------------------------------------------------------{OBJECTS}
+//----------------------------------------------------------------------------------------------------------------------
+// O B J E C T   M A N A G E M E N T
+//----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+static ObjectInfo* objectType(Nerd N, GcObj* obj)
+{
+    return (ObjectInfo *)N->objectInfo.start + obj->type;
+}
+
+static void objectDelete(Nerd N, void* obj)
+{
+    GcObj* gcObj = (GcObj *)obj - 1;
+    ObjectInfo* info = objectType(N, gcObj);
+    if (info->deleteFn)
+    {
+        info->deleteFn(N, obj);
+    }
+    NeFree(N, gcObj, sizeof(GcObj) + info->size);
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+static int objectEval(Nerd N, Atom a, Atom* outResult)
+{
+    assert(a.type == AT_Object);
+    ObjectInfo* info = objectType(N, a.obj);
+    if (info->evalFn)
+    {
+        return info->evalFn(N, a, a.obj + 1, outResult);
+    }
+    else
+    {
+        *outResult = a;
+        return 1;
+    }
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+int NeObjectRegister(Nerd N, ObjectInfo* info)
+{
+    int type = (int)(N->objectInfo.cursor / sizeof(ObjectInfo));
+    ObjectInfo* newInfo = (ObjectInfo *)arenaAlloc(N, &N->objectInfo, sizeof(ObjectInfo));
+    *newInfo = *info;
+    return type;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+void* NeObjectCreate(Nerd N, int type, const void* data)
+{
+    ObjectInfo* info = (ObjectInfo *)N->objectInfo.start + type;
+    GcObj* newObj = (GcObj *)NeAlloc(N, sizeof(GcObj) + info->size);
+    if (newObj)
+    {
+        newObj->next = N->gcObjs;
+        newObj->type = type;
+        memset(newObj + 1, 0, info->size);
+
+        if (info->createFn)
+        {
+            if (!info->createFn(N, newObj + 1, data))
+            {
+                objectDelete(N, newObj + 1);
+                return 0;
+            }
+        }
+
+        N->gcObjs = newObj;
+        return newObj + 1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+//----------------------------------------------------------------------------------------------------------------------{STRINGS}
+//----------------------------------------------------------------------------------------------------------------------
+// S T R I N G S
+//----------------------------------------------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------------------------------------------
+
+typedef struct  
+{
+    i64 size;
+    char* str;
+}
+StringObject;
+
+typedef struct  
+{
+    const char* start;
+    const char* end;
+}
+Range;
+
+static int stringCreate(Nerd N, void* obj, const void* data)
+{
+    StringObject* str = (StringObject *)obj;
+    Range* range = (Range *)data;
+    str->size = (i64)(range->end - range->start);
+    str->str = (char *)NeAlloc(N, str->size + 1);
+    if (str->str)
+    {
+        memcpy(str->str, range->start, str->size);
+        str->str[str->size] = 0;
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
+}
+
+static void stringDelete(Nerd N, void* obj)
+{
+    StringObject* str = (StringObject *)obj;
+    NeFree(N, str->str, str->size + 1);
+}
+
+static void stringToString(Nerd N, void* obj, NeStringMode mode)
+{
+    StringObject* str = (StringObject *)obj;
+    if (mode != NSM_Normal)
+    {
+        NeScratchFormat(N, "\"");
+    }
+    NeScratchFormat(N, str->str);
+    if (mode != NSM_Normal)
+    {
+        NeScratchFormat(N, "\"");
+    }
+}
+
+static int registerStringType(Nerd N)
+{
+    ObjectInfo strObjectInfo = {
+        .name = "string",
+        .createFn = &stringCreate,
+        .deleteFn = &stringDelete,
+        .evalFn = 0,
+        .toStringFn = &stringToString,
+        .size = sizeof(StringObject)
+    };
+    return NeObjectRegister(N, &strObjectInfo);
 }
 
 //----------------------------------------------------------------------------------------------------------------------{LIFETIME}
@@ -429,6 +604,11 @@ Nerd NeOpen(NeConfig* config)
 
         // Initialise the scratch.
         arenaInit(N, &N->scratch, 4096);
+
+        // Initialise object types
+        N->gcObjs = 0;
+        arenaInit(N, &N->objectInfo, sizeof(ObjectInfo) * 16);
+        N->stringType = registerStringType(N);
     }
 
     return N;
@@ -438,7 +618,15 @@ Nerd NeOpen(NeConfig* config)
 
 void NeClose(Nerd N)
 {
+    while (N->gcObjs)
+    {
+        GcObj* nextObj = N->gcObjs->next;
+        objectDelete(N, N->gcObjs + 1);
+        N->gcObjs = nextObj;
+    }
+
     arenaDone(N, &N->scratch);
+    arenaDone(N, &N->objectInfo);
     NeFree(N, N, sizeof(struct _Nerd));
 }
 
@@ -499,6 +687,33 @@ Atom NeMakeChar(char c)
     return a;
 }
 
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeString(Nerd N, const char* str)
+{
+    return NeMakeStringRanged(N, str, str + (strlen(str)));
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeStringRanged(Nerd N, const char* start, const char* end)
+{
+    Range r = { .start = start, .end = end };
+    StringObject* str = (StringObject *)NeObjectCreate(N, N->stringType, &r);
+    return NeMakeObject(N, str);
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+
+Atom NeMakeObject(Nerd N, void* object)
+{
+    Atom a = {
+        .type = AT_Object,
+        .obj = (GcObj *)object - 1
+    };
+    return a;
+}
+
 //----------------------------------------------------------------------------------------------------------------------{PRINT}
 //----------------------------------------------------------------------------------------------------------------------
 // P R I N T I N G
@@ -536,33 +751,15 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
     switch (value.type)
     {
     case AT_Nil:
-        scratchFormat(N, "nil");
+        NeScratchFormat(N, "nil");
         break;
 
     case AT_Integer:
-        scratchFormat(N, "%lli", value.i);
-        break;
-
-    case AT_String:
-        switch (mode)
-        {
-        case NSM_Code:
-        case NSM_REPL:
-            scratchFormat(N, "\"%s\"", value.str);
-            break;
-
-        case NSM_Normal:
-            scratchFormat(N, "%s", value.str);
-            break;
-
-        default:
-            assert(0);
-            scratchFormat(N, "<invalid mode>");
-        }
+        NeScratchFormat(N, "%lli", value.i);
         break;
 
     case AT_Boolean:
-        scratchFormat(N, "%s", value.i ? "yes" : "no");
+        NeScratchFormat(N, "%s", value.i ? "yes" : "no");
         break;
 
     case AT_Character:
@@ -572,7 +769,7 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
 
             if (NSM_Normal != mode)
             {
-                scratchFormat(N, "\\");
+                NeScratchFormat(N, "\\");
 
                 // Check for long name version.
                 if (c <= ' ' || c > 126)
@@ -582,7 +779,7 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
                     {
                         if (c == gCharMap[i].ch)
                         {
-                            scratchFormat(N, "%s", gCharMap[i].name + 2);
+                            NeScratchFormat(N, "%s", gCharMap[i].name + 2);
                             done = 1;
                             break;
                         }
@@ -590,7 +787,7 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
                     if (!done && !gCharMap[i].name)
                     {
                         // Unknown characters, so show hex version.
-                        scratchFormat(N, "#x%02x", (int)c);
+                        NeScratchFormat(N, "#x%02x", (int)c);
                         done = 1;
                     }
                 }
@@ -602,18 +799,41 @@ NeString NeToString(Nerd N, Atom value, NeStringMode mode)
                 if (NE_IS_WHITESPACE(c) || '\r' == c || '\b' == c || '\033' == c ||
                     (c > ' ' && c < 127))
                 {
-                    scratchAdd(N, &c, &c + 1);
+                    NeScratchAdd(N, &c, &c + 1);
                 }
                 else
                 {
-                    scratchFormat(N, "?");
+                    NeScratchFormat(N, "?");
                 }
             }
         }
         break;
 
+    case AT_Object:
+        {
+            ObjectInfo* info = objectType(N, value.obj);
+            if (info->toStringFn)
+            {
+                info->toStringFn(N, value.obj + 1, mode);
+            }
+            else
+            {
+                NeScratchAddChar(N, '<');
+                if (info->name)
+                {
+                    NeScratchAdd(N, info->name, info->name + strlen(info->name));
+                }
+                else
+                {
+                    NeScratchFormat(N, "object");
+                }
+                NeScratchFormat(N, ":%x>", value.obj + 1);
+            }
+        }
+        break;
+
     default:
-        scratchFormat(N, "<invalid atom>");
+        NeScratchFormat(N, "<invalid atom>");
         assert(0);
     }
 
@@ -628,7 +848,7 @@ static void NeOutV(Nerd N, const char* format, va_list args)
     if (N->config.outputFunc)
     {
         const char* msg = scratchStart(N);
-        scratchFormatV(N, format, args);
+        NeScratchFormatV(N, format, args);
         scratchEnd(N);
         N->config.outputFunc(N, msg);
     }
@@ -663,6 +883,7 @@ typedef enum _NeToken
     NeToken_Number,         // e.g. 42, -34
     NeToken_Symbol,         // e.g. foo, bar, hello-world
     NeToken_Character,      // e.g. \c \space 
+    NeToken_String,         // e.g. "Hello", "A new line\n"
 
     // Keywords
     NeToken_KEYWORDS,
@@ -816,7 +1037,7 @@ NeToken lexErrorV(Nerd N, NeLex* L, const char* origin, const char* format, va_l
     NeOut(N, "%s(%d): LEX ERROR: ", origin, L->line);
 
     const char* errorMsg = scratchStart(N);
-    scratchFormatV(N, format, args);
+    NeScratchFormatV(N, format, args);
     scratchEnd(N);
 
     NeOut(N, errorMsg);
@@ -995,9 +1216,9 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
 
 #if NE_DEBUG_SYMBOL_HASHES
         const char* msg = scratchStart(N);
-        scratchFormat(N, "Hash: \"");
-        scratchAdd(N, s0, L->cursor);
-        scratchFormat(N, "\": %x\n", (int)h);
+        NeScratchFormat(N, "Hash: \"");
+        NeScratchAdd(N, s0, L->cursor);
+        NeScratchFormat(N, "\": %x\n", (int)h);
         scratchEnd(N);
         NeOut(N, msg);
 #endif
@@ -1023,6 +1244,31 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
         // Must be a symbol!
         // #todo: symbols
         return lexError(N, L, origin, "Symbols not implemented yet!");
+    }
+
+    //------------------------------------------------------------------------------------------------------------------
+    // Check for strings
+    //------------------------------------------------------------------------------------------------------------------
+
+    else if ('"' == c)
+    {
+        s0 = L->cursor;
+        c = nextChar(L);
+        while ((c != 0) && (c != '\n') && (c != '"'))
+        {
+            c = nextChar(L);
+        }
+
+        if (c == '"')
+        {
+            // End of string found
+            return lexBuild(N, info, s0, L->cursor - 1, L->line, NeToken_String, NeMakeNil());
+        }
+        else
+        {
+            // Unterminated string
+            return lexError(N, L, origin, "Unterminated string.");
+        }
     }
 
     //------------------------------------------------------------------------------------------------------------------
@@ -1135,7 +1381,7 @@ static NeToken lexNext(Nerd N, Arena* info, NeLex* L, const char* origin)
 //----------------------------------------------------------------------------------------------------------------------
 // Analyse some source code and obtains it's tokens.  It returns an arena full of NeLexInfo structures.
 
-static Arena lex(Nerd N, const char* origin, const char* start, const char* end)
+static int lex(Nerd N, const char* origin, const char* start, const char* end, Arena* outArena)
 {
     NeLex L;
     L.line = 1;
@@ -1153,7 +1399,15 @@ static Arena lex(Nerd N, const char* origin, const char* start, const char* end)
         t = lexNext(N, &info, &L, origin);
     }
 
-    return info;
+    if (t == NeToken_Error)
+    {
+        arenaDone(N, &info);
+        *outArena = info;
+        return 0;
+    }
+
+    *outArena = info;
+    return 1;
 }
 
 //----------------------------------------------------------------------------------------------------------------------{READ}
@@ -1183,6 +1437,10 @@ static int nextAtom(Nerd N, const NeLexInfo** tokens, const NeLexInfo* end, Atom
         *outAtom = NeMakeBool(0);
         break;
 
+    case NeToken_String:
+        *outAtom = NeMakeStringRanged(N, t->start, t->end);
+        break;
+
     default:
         // #todo: add error message.
         result = 0;
@@ -1205,10 +1463,12 @@ static int eval(Nerd N, Atom a, Atom* outResult)
     case AT_Integer:
     case AT_Boolean:
     case AT_Character:
-    case AT_String:
         // These evaluate to themselves.
         *outResult = a;
         break;
+
+    case AT_Object:
+        return objectEval(N, a, outResult);
 
     default:
         assert(0);
@@ -1229,13 +1489,17 @@ int NeRun(Nerd N, char* origin, char* source, i64 size, Atom* outResult)
     }
 
     // Fetch the lexemes.
-    Arena tokenArena = lex(N, origin, source, source + size);
+    *outResult = NeMakeNil();
+    Arena tokenArena;
+    if (!lex(N, origin, source, source + size, &tokenArena))
+    {
+        return 0;
+    }
     const NeLexInfo* tokens = (NeLexInfo *)tokenArena.start;
     const NeLexInfo* endToken = tokens + (tokenArena.cursor / sizeof(NeLexInfo));
 
     int result = 1;
 
-    *outResult = NeMakeNil();
     while (tokens != endToken)
     {
         if (!nextAtom(N, &tokens, endToken, outResult)) return 0;

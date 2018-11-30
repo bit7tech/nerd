@@ -53,6 +53,7 @@ void SigHandler(int sig)
 void out(Nerd N, const char* msg)
 {
     OutputDebugStringA(msg);
+    printf("%s", msg);
 }
 
 int _main(int argc, char** argv)
